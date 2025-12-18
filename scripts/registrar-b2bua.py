@@ -30,7 +30,8 @@ class kamailio:
 
     # Function called for REQUEST messages received 
     def ksr_request_route(self, msg):
-        
+        # Aceder à variável global
+        global redial_lists
         # Handle Instant Messages (SIP MESSAGE)
         if KSR.is_method("MESSAGE"):
               # 1. SPECIAL CASE: PIN Validation Service
@@ -62,8 +63,6 @@ class kamailio:
                     # Identificar quem enviou a mensagem ($fu = From URI)
                     sender = KSR.pv.get("$fu")
 
-                    # Aceder à variável global e atualizar a lista deste utilizador
-                    global redial_lists
                     redial_lists[sender] = target_users
 
                     KSR.info("Redial list updated for " + sender + ": " + str(target_users) + "\n")
@@ -130,11 +129,20 @@ class kamailio:
             # Lógica de verificação de domínio
             if (domain == "acme.operador"):
                 
-                # Aceder à variável global
-                global redial_lists
                 
-                # Verificar o cabeçalho Expires para distinguir Registo de De-registo
+                # --- Lógica de Deteção de Expires Melhorada ---
                 expires = KSR.hdr.get("Expires")
+                
+                # Se não houver cabeçalho Expires, verificar dentro do Contact
+                if expires is None:
+                    contact = KSR.pv.get("$ct")
+                    # Verifica se "expires=0" está presente no Contact (de forma simples)
+                    if contact and "expires=0" in contact.lower():
+                        expires = "0"
+                
+                # Log para depuração (ajuda a confirmar o que foi detetado)
+                KSR.info("DEBUG: User " + user_aor + " sent Expires=" + str(expires) + "\n")
+                # ----------------------------------------------
                 
                 # De-registo (Expires == 0)
                 if expires == "0":
@@ -142,7 +150,7 @@ class kamailio:
                     # Se a lista existir, removê-la
                     if user_aor in redial_lists:
                         del redial_lists[user_aor]
-                        KSR.info("redial list" + redial_lists[user_aor] + "\n")
+                        KSR.info("User " + user_aor + " removed from redial list.\n")
                         
                 # Registo ou Renovação (Expires > 0 ou ausente)
                 else:
@@ -150,7 +158,7 @@ class kamailio:
                     # O enunciado diz: "Registo implica criação de lista vazia"
                     # Isto reinicia a lista sempre que o utilizador se regista/renova
                     redial_lists[user_aor] = []
-                    KSR.info("redial list" + redial_lists[user_aor] + "\n")
+                    KSR.info("redial list" + str(redial_lists[user_aor]) + "\n")
 
                    # Guardar a localização (fazer o registo efetivo no Kamailio)
                     KSR.registrar.save('location', 0)
@@ -160,28 +168,71 @@ class kamailio:
                 KSR.sl.send_reply(403, "Forbidden Domain")
                 return 1
 
-        # Working as a Redirect server
+        # Working as a Redirect/B2BUA server
         if KSR.is_method("INVITE"):                     
             KSR.info("INVITE R-URI: " + KSR.pv.get("$ru") + "\n")
             KSR.info("        From: " + KSR.pv.get("$fu") +
                               " To: " + KSR.pv.get("$tu") +"\n")
 
-            if (KSR.pv.get("$td") != "acme.operador"):       # Check if To domain is sipnet.a
-#                   KSR.forward()       # Forwarding to a different network using statless mode
-                KSR.rr.record_route()  # Add Record-Route header
-                #KSR.tm.t_relay()    # Forwarding using transaction mode
+            # --- LÓGICA REDIAL ALTERADA ---
+            sender = KSR.pv.get("$fu")      # Quem liga (Bob)
+            target_aor = KSR.pv.get("$tu")  # Para quem ligou (Alice)
+
+
+            # Verifica se o remetente tem uma lista E se o destino faz parte dessa lista
+            # OU se ligou explicitamente para "redial"
+            is_redial_target = False
+            
+            # Condição 1: Ligou para "redial"
+            if KSR.pv.get("$rU") == "redial" and KSR.pv.get("$rd") == "acme.operador":
+                is_redial_target = True
+            
+            # Condição 2: Ligou para alguém que está na sua lista
+            elif sender in redial_lists and target_aor in redial_lists[sender]:
+                is_redial_target = True
+                KSR.info("MATCH: User " + target_aor + " found in " + sender + "'s redial list.\n")
+
+            # EXECUTA A LÓGICA SE ALGUMA CONDIÇÃO FOR VERDADEIRA
+            if is_redial_target:
+                if sender in redial_lists:
+                    targets = redial_lists[sender]
+                    KSR.info("Executing Redial Logic for " + sender + ". Targets: " + str(targets) + "\n")
+                    
+                    if not targets:
+                        KSR.sl.send_reply(404, "Redial List Empty")
+                        return 1
+
+                    # 1. Redirecionar para o primeiro da lista
+                    first_target = targets[0]
+                    KSR.pv.sets("$ru", first_target)
+                    
+                    # 2. Adicionar os restantes (Forking)
+                    for target in targets[1:]:
+                        KSR.tm.t_append_branch(target)
+                        
+                    # 3. Encaminhar
+                    KSR.tm.t_relay()
+                    return 1
+                else:
+                    KSR.sl.send_reply(404, "No Redial List Found for Sender")
+                    return 1
+            # ---------------------
+
+            # Lógica Normal (Se não for redial/lista)
+            if (KSR.pv.get("$td") != "acme.operador"):       
+                KSR.rr.record_route()
                 KSR.sl.send_reply(403, "Forbidden - Wrong destination")
                 return 1
-            if (KSR.pv.get("$td") == "acme.operador"):             # Check if To domain is sipnet.a (unnecessary duplicate)
-                if (KSR.registrar.lookup("location") == 1):   # Check if registered
-#                       KSR.info("  lookup changed R-URI to : " + KSR.pv.get("$ru") +"\n")
-#                       KSR.forward()       # Forwarding to UA contact using statless mode
-                    KSR.rr.record_route()  # Add Record-Route header
-                    KSR.tm.t_relay()  # Forwarding using transaction mode
+            
+            if (KSR.pv.get("$td") == "acme.operador"):             
+                if (KSR.registrar.lookup("location") == 1):   
+                    KSR.rr.record_route() 
+                    KSR.tm.t_relay()  
                     return 1
                 else:
                     KSR.sl.send_reply(404, "Not found")
                     return 1
+
         if KSR.is_method("ACK"):  
             KSR.info("ACK R-URI: " + KSR.pv.get("$ru") + "\n")
             KSR.rr.loose_route()  # In case there are Record-Route headers
@@ -210,8 +261,3 @@ class kamailio:
         KSR.info("  Status is:"+ str(KSR.pv.get("$rs")) + "\n")
         return 1
 
-    # Function called for messages sent/transit
-    def ksr_onsend_route(self, msg):
-        KSR.info("===== onsend route - from kamailio python script:")
-        KSR.info("   %s\n" %(msg.Type))
-        return 1
