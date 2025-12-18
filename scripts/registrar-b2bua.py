@@ -49,23 +49,28 @@ class kamailio:
                 KSR.info("Message Received for Redial: " + message + "\n")
                 # Lógica para o comando ACTIVATE
                 if message.startswith("ACTIVATE"):
-                    # Separar o conteúdo da mensagem por espaços
                     parts = message.split()
+                    raw_targets = parts[1:]
 
-                    # Os utilizadores alvo são todos os elementos após a palavra "ACTIVATE"
-                    # Exemplo: "ACTIVATE sip:bob@acme.operador sip:carol@acme.operador"
-                    target_users = parts[1:]
-
-                    if not target_users:
+                    if not raw_targets:
                         KSR.sl.send_reply(400, "Bad Request - No users provided")
                         return 1
 
-                    # Identificar quem enviou a mensagem ($fu = From URI)
+                    # Identificar quem enviou a mensagem
                     sender = KSR.pv.get("$fu")
+                    
+                    # NOVA LÓGICA: Normalizar os endereços adicionando "sip:" se necessário
+                    normalized_targets = []
+                    for user in raw_targets:
+                        if not user.lower().startswith("sip:"):
+                            normalized_targets.append("sip:" + user)
+                        else:
+                            normalized_targets.append(user)
 
-                    redial_lists[sender] = target_users
+                    # Guardar a lista normalizada
+                    redial_lists[sender] = normalized_targets
 
-                    KSR.info("Redial list updated for " + sender + ": " + str(target_users) + "\n")
+                    KSR.info("Redial list updated for " + sender + ": " + str(normalized_targets) + "\n")
                     KSR.sl.send_reply(200, "OK - List Activated")
                     return 1
                 # (Opcional) Manter a lógica antiga "ACTIVE" se ainda for necessária, ou removê-la
