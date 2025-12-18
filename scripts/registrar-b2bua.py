@@ -15,10 +15,14 @@ class kamailio:
     def __init__(self):
         KSR.info('===== kamailio.__init__\n')
 
+
+
     # Mandatory function - Kamailio subprocesses
     def child_init(self, rank):
         KSR.info('===== kamailio.child_init(%d)\n' % rank)
         return 0
+
+
 
     # Function called for messages sent/transit
     def ksr_onsend_route(self, msg):
@@ -27,6 +31,7 @@ class kamailio:
         # KSR.info("   %s\n" %(msg.Type))
         return 1
         
+
 
     # Function called for REQUEST messages received 
     def ksr_request_route(self, msg):
@@ -205,7 +210,9 @@ class kamailio:
                     KSR.pv.sets("$avp(retries)", "2")
                     
                     # 2. Armamos a Rota de Falha (tem de corresponder ao nome no app.cfg)
-                    KSR.tm.t_on_failure("REDIAL_FAILURE")
+                    # in the INVITE handling
+                    KSR.tm.t_on_failure("ksr_failure_route_REDIAL_FAILURE")
+
                     
                     KSR.info("Starting Call with Retry Logic (2 retries)...\n")
                     
@@ -261,30 +268,33 @@ class kamailio:
 
 
 
-
-
     # Function called for REPLY messages received
     def ksr_reply_route(self, msg):
-        KSR.info("===== reply_route - from kamailio python script: ")
-        KSR.info("  Status is:"+ str(KSR.pv.get("$rs")) + "\n")
+        code = KSR.pv.get("$rs")
+        if code is not None:
+            KSR.pv.sets("$avp(last_reply_code)", str(code))
+        KSR.info("===== reply_route - from kamailio python script: \n")
+        KSR.info("  Status is:" + str(code) + "\n")
         return 1
 
 
-
-
-    # ---------------------------------------------------------
-    # Rota de Falha: O nome TEM de ser ksr_failure_route_NOME
-    # onde NOME é o que usou em t_on_failure("NOME")
+# ---------------------------------------------------------
+    # Failure Route
     # ---------------------------------------------------------
     def ksr_failure_route_REDIAL_FAILURE(self, msg):
-        code = KSR.pv.get("$rs") # Código do erro
+        # ERROR FIX: In failure_route, $rs is null because we are handling the request.
+        # We must use $T(reply_code) to get the status of the reply that caused the failure.
+
+        code_val = KSR.pv.get("$avp(last_reply_code)")
+        if code_val is not None:
+            code = int(code_val)
+        else:
+            code = 0
         
         # 408=Timeout, 480=Unavailable, 486=Busy
-        if code == 408 or code == 480 or code == 486:
-            # Recupera o valor (pode vir como int ou str dependendo da versão)
+        if code in (408, 480, 486, 590):
             retries_val = KSR.pv.get("$avp(retries)")
             
-            # Converter para inteiro para fazer a conta
             if retries_val is not None:
                 retries = int(retries_val)
             else:
@@ -293,11 +303,9 @@ class kamailio:
             if retries > 0:
                 KSR.info("Call Failed (" + str(code) + "). Retrying... Remaining: " + str(retries) + "\n")
                 
-                # Decrementa e converte para STRING antes de guardar
                 next_try = str(retries - 1)
                 KSR.pv.sets("$avp(retries)", next_try)
                 
-                # Prepara nova tentativa
                 KSR.tm.t_on_failure("REDIAL_FAILURE") 
                 KSR.tm.t_relay()
                 return 1
