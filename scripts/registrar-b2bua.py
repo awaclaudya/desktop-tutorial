@@ -118,7 +118,6 @@ class kamailio:
             return 1
 
         # Working as a Registrar server
-        # Working as a Registrar server
         if KSR.is_method("REGISTER"):
             domain = KSR.pv.get("$td")
             user_aor = KSR.pv.get("$tu") # Address of Record (ex: sip:alice@acme.operador)
@@ -129,21 +128,16 @@ class kamailio:
             # Lógica de verificação de domínio
             if (domain == "acme.operador"):
                 
-                
                 # --- Lógica de Deteção de Expires Melhorada ---
                 expires = KSR.hdr.get("Expires")
                 
                 # Se não houver cabeçalho Expires, verificar dentro do Contact
                 if expires is None:
                     contact = KSR.pv.get("$ct")
-                    # Verifica se "expires=0" está presente no Contact (de forma simples)
+                    
                     if contact and "expires=0" in contact.lower():
                         expires = "0"
-                
-                # Log para depuração (ajuda a confirmar o que foi detetado)
-                KSR.info("DEBUG: User " + user_aor + " sent Expires=" + str(expires) + "\n")
-                # ----------------------------------------------
-                
+
                 # De-registo (Expires == 0)
                 if expires == "0":
                     KSR.info("User De-registering: " + user_aor + ". Deleting redial list.\n")
@@ -151,16 +145,18 @@ class kamailio:
                     if user_aor in redial_lists:
                         del redial_lists[user_aor]
                         KSR.info("User " + user_aor + " removed from redial list.\n")
+                    
+                    # PROCESS DE-REGISTRATION AND EXIT
+                    KSR.registrar.save('location', 0)
+                    return 1
                         
-                # Registo ou Renovação (Expires > 0 ou ausente)
                 else:
                     KSR.info("User Registering: " + user_aor + ". Creating empty redial list.\n")
-                    # O enunciado diz: "Registo implica criação de lista vazia"
-                    # Isto reinicia a lista sempre que o utilizador se regista/renova
+                    # Registo implica criação de lista vazia
                     redial_lists[user_aor] = []
                     KSR.info("redial list" + str(redial_lists[user_aor]) + "\n")
 
-                   # Guardar a localização (fazer o registo efetivo no Kamailio)
+                    # Guardar a localização (fazer o registo efetivo no Kamailio)
                     KSR.registrar.save('location', 0)
                     return 1
             else:
@@ -168,70 +164,72 @@ class kamailio:
                 KSR.sl.send_reply(403, "Forbidden Domain")
                 return 1
 
+
         # Working as a Redirect/B2BUA server
         if KSR.is_method("INVITE"):                     
             KSR.info("INVITE R-URI: " + KSR.pv.get("$ru") + "\n")
-            KSR.info("        From: " + KSR.pv.get("$fu") +
-                              " To: " + KSR.pv.get("$tu") +"\n")
+            
+            sender = KSR.pv.get("$fu")
+            target_aor = KSR.pv.get("$tu")
 
-            # --- LÓGICA REDIAL ALTERADA ---
-            sender = KSR.pv.get("$fu")      # Quem liga (Bob)
-            target_aor = KSR.pv.get("$tu")  # Para quem ligou (Alice)
-
-
-            # Verifica se o remetente tem uma lista E se o destino faz parte dessa lista
-            # OU se ligou explicitamente para "redial"
+            # --- LÓGICA REDIAL / RETRY ---
             is_redial_target = False
             
-            # Condição 1: Ligou para "redial"
+            # 1. Verifica se ligou para "redial"
             if KSR.pv.get("$rU") == "redial" and KSR.pv.get("$rd") == "acme.operador":
                 is_redial_target = True
             
-            # Condição 2: Ligou para alguém que está na sua lista
+            # 2. Verifica se ligou para alguém da lista (ex: Alice)
             elif sender in redial_lists and target_aor in redial_lists[sender]:
                 is_redial_target = True
-                KSR.info("MATCH: User " + target_aor + " found in " + sender + "'s redial list.\n")
+                KSR.info("MATCH: User " + target_aor + " is in " + sender + "'s list. Activating Retry Logic.\n")
 
-            # EXECUTA A LÓGICA SE ALGUMA CONDIÇÃO FOR VERDADEIRA
             if is_redial_target:
                 if sender in redial_lists:
                     targets = redial_lists[sender]
-                    KSR.info("Executing Redial Logic for " + sender + ". Targets: " + str(targets) + "\n")
-                    
                     if not targets:
                         KSR.sl.send_reply(404, "Redial List Empty")
                         return 1
 
-                    # 1. Redirecionar para o primeiro da lista
+                    # Vamos focar no primeiro destino da lista para o Retry
                     first_target = targets[0]
                     KSR.pv.sets("$ru", first_target)
                     
-                    # 2. Adicionar os restantes (Forking)
-                    for target in targets[1:]:
-                        KSR.tm.t_append_branch(target)
-                        
-                    # 3. Encaminhar
+                    # --- CONFIGURAÇÃO DAS TENTATIVAS (RETRY) ---
+                    # 1. Definimos que queremos 2 tentativas extra
+                    KSR.pv.sets("$avp(retries)", "2")
+                    
+                    # 2. Armamos a Rota de Falha (tem de corresponder ao nome no app.cfg)
+                    KSR.tm.t_on_failure("REDIAL_FAILURE")
+                    
+                    KSR.info("Starting Call with Retry Logic (2 retries)...\n")
+                    
+                    # 3. Fazemos o Lookup
+                    if KSR.registrar.lookup("location") != 1:
+                        KSR.sl.send_reply(404, "User Offline")
+                        return 1
+
+                    # 4. Envia
                     KSR.tm.t_relay()
                     return 1
                 else:
-                    KSR.sl.send_reply(404, "No Redial List Found for Sender")
+                    KSR.sl.send_reply(404, "No Redial List Found")
                     return 1
             # ---------------------
 
-            # Lógica Normal (Se não for redial/lista)
+            # Lógica Normal (para quem não está na lista)
             if (KSR.pv.get("$td") != "acme.operador"):       
-                KSR.rr.record_route()
-                KSR.sl.send_reply(403, "Forbidden - Wrong destination")
+                KSR.sl.send_reply(403, "Forbidden")
                 return 1
             
             if (KSR.pv.get("$td") == "acme.operador"):             
                 if (KSR.registrar.lookup("location") == 1):   
-                    KSR.rr.record_route() 
                     KSR.tm.t_relay()  
                     return 1
                 else:
                     KSR.sl.send_reply(404, "Not found")
                     return 1
+
 
         if KSR.is_method("ACK"):  
             KSR.info("ACK R-URI: " + KSR.pv.get("$ru") + "\n")
@@ -255,9 +253,50 @@ class kamailio:
         KSR.sl.send_reply(403, "Forbiden method")
         return 1
 
+
+
+
+
+
     # Function called for REPLY messages received
     def ksr_reply_route(self, msg):
         KSR.info("===== reply_route - from kamailio python script: ")
         KSR.info("  Status is:"+ str(KSR.pv.get("$rs")) + "\n")
         return 1
 
+
+
+
+    # ---------------------------------------------------------
+    # Rota de Falha: O nome TEM de ser ksr_failure_route_NOME
+    # onde NOME é o que usou em t_on_failure("NOME")
+    # ---------------------------------------------------------
+    def ksr_failure_route_REDIAL_FAILURE(self, msg):
+        code = KSR.pv.get("$rs") # Código do erro
+        
+        # 408=Timeout, 480=Unavailable, 486=Busy
+        if code == 408 or code == 480 or code == 486:
+            # Recupera o valor (pode vir como int ou str dependendo da versão)
+            retries_val = KSR.pv.get("$avp(retries)")
+            
+            # Converter para inteiro para fazer a conta
+            if retries_val is not None:
+                retries = int(retries_val)
+            else:
+                retries = 0
+            
+            if retries > 0:
+                KSR.info("Call Failed (" + str(code) + "). Retrying... Remaining: " + str(retries) + "\n")
+                
+                # Decrementa e converte para STRING antes de guardar
+                next_try = str(retries - 1)
+                KSR.pv.sets("$avp(retries)", next_try)
+                
+                # Prepara nova tentativa
+                KSR.tm.t_on_failure("REDIAL_FAILURE") 
+                KSR.tm.t_relay()
+                return 1
+            else:
+                KSR.info("Call Failed. No more retries left.\n")
+        
+        return 1
