@@ -1,9 +1,6 @@
 import sys
 import KSR as KSR
 
-# =========================================================
-# Global state (NOTE: em produção usar htable/redis/usrloc)
-# =========================================================
 redial_lists = {}
 
 # =========================================================
@@ -13,6 +10,7 @@ redial_lists = {}
 def get_aor_from_from():
     """Retorna AOR limpo a partir do From (sem tag)."""
     return "sip:%s@%s" % (KSR.pv.get("$fU"), KSR.pv.get("$fd"))
+
 
 # =========================================================
 # Mandatory module init
@@ -42,12 +40,12 @@ class kamailio:
     def ksr_request_route(self, msg):
         global redial_lists
 
-        # ---------------- MESSAGE ----------------
+        # ---------------- MENSAGEM ----------------
         if KSR.is_method("MESSAGE"):
             r_user = KSR.pv.get("$rU")
             r_domain = KSR.pv.get("$rd")
 
-            # --- REDIAL CONTROL SERVICE ---
+            # --- REDIAL ---
             if r_user == "redial" and r_domain == "acme.operador":
                 body = KSR.pv.get("$rb")
                 if body is None:
@@ -75,10 +73,15 @@ class kamailio:
                     KSR.sl.send_reply(200, "OK - Redial Activated")
                     return 1
 
+                if message.startswith("DEACTIVATE"):
+                    del redial_lists[sender]
+                    KSR.sl.send_reply(200, "OK - Redial Deactivated")
+                    return 1
+
                 KSR.sl.send_reply(400, "Unknown Command")
                 return 1
 
-            # --- NORMAL CHAT (local only) ---
+            # --- MENSAGEM ENTRE UTILIZADORES ---
             if KSR.pv.get("$td") == "acme.operador":
                 if KSR.registrar.lookup("location") == 1:
                     KSR.tm.t_relay()
@@ -90,7 +93,7 @@ class kamailio:
             KSR.sl.send_reply(403, "Forbidden")
             return 1
 
-        # ---------------- REGISTER ----------------
+        # ---------------- REGISTAR ----------------
         if KSR.is_method("REGISTER"):
             domain = KSR.pv.get("$td")
             aor = KSR.pv.get("$tu")
@@ -150,7 +153,7 @@ class kamailio:
                 KSR.tm.t_relay()
                 return 1
 
-            # Normal call
+            # CHAMADA BÁSICA
             if KSR.pv.get("$td") != "acme.operador":
                 KSR.sl.send_reply(403, "Forbidden")
                 return 1
