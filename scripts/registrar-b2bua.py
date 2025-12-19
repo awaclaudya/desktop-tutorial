@@ -1,9 +1,7 @@
 import sys
 import KSR as KSR
 
-# =========================================================
-# Variáveis globais
-# =========================================================
+# --- Variaveis globais ---
 redial_lists = {}
 OPERATOR_DOMAIN = "acme.operador"
 PIN_DOMAIN = "acme.pt"
@@ -12,10 +10,12 @@ TEST_TIMEOUT = 36000
 
 
 
-
 def get_aor():
     return f"sip:{KSR.pv.get('$fU')}@{KSR.pv.get('$fd')}"
 
+
+
+# --- Verifica o Dominio ---
 def check_domain():
     if KSR.pv.get("$fd") != OPERATOR_DOMAIN:
         KSR.info(f"[SEC] Denied: {KSR.pv.get('$fd')}\n")
@@ -25,9 +25,10 @@ def check_domain():
 
 
 
-
 def mod_init():
     return kamailio()
+
+
 
 class kamailio:
     def child_init(self, rank): return 0
@@ -44,7 +45,7 @@ class kamailio:
             KSR.sl.send_reply(480, "Redial Given Up")
             return 1
 
-        # Selecionar alvo (Loop Infinito usando Modulo)
+        # Selecionar a quem fazer redial
         target = targets[idx % len(targets)]
         KSR.info(f"[REDIAL] Retry {retries} left. Target: {target}\n")
 
@@ -52,7 +53,7 @@ class kamailio:
         KSR.pv.sets("$ru", target)
         KSR.pv.sets("$avp(current_idx)", str(idx + 1))
         
-        # Verificar se está ONLINE (Lookup)
+        # Verificar se está registado
         if KSR.registrar.lookup("location") != 1:
             KSR.info(f"[REDIAL] {target} Offline. Skipping...\n")
             return self.try_next_redial() # Recursão para o próximo
@@ -109,38 +110,38 @@ class kamailio:
                     KSR.sl.send_reply(403, "Invalid PIN")
                     return 1
 
-
+            # --- Activate/Deactivate serviço Redial 2.0 ---
             if dest_user == "redial":
                 if sender not in redial_lists:
                     KSR.sl.send_reply(403, "Not Registered")
                     return 1
 
-            # --- Ativação do Redial 2.0 ---
-            if body.startswith("ACTIVATE"):
-                parts = body.split()[1:] 
-                clean_list = []
+                # --- Ativação do Redial 2.0 ---
+                if body.startswith("ACTIVATE"):
+                    parts = body.split()[1:] 
+                    clean_list = []
 
-                for user in parts:
-                    user = user.strip()
-                    if user.startswith("sip:"):
-                        user = user.replace("sip:", "")
+                    for user in parts:
+                        user = user.strip()
+                        if user.startswith("sip:"):
+                            user = user.replace("sip:", "")
 
-                    clean_list.append("sip:" + user)
-                    
-                redial_lists[sender] = clean_list
-                KSR.sl.send_reply(200, f"Activated: {clean_list}")
+                        clean_list.append("sip:" + user)
+
+                    redial_lists[sender] = clean_list
+                    KSR.sl.send_reply(200, f"Activated: {clean_list}")
+                    return 1
+
+                # --- Desativação do Redial 2.0 ---
+                if body.startswith("DEACTIVATE"):
+                    redial_lists[sender] = []
+                    KSR.sl.send_reply(200, "Deactivated")
+                    return 1
+
+                KSR.sl.send_reply(400, "Unknown Command")
                 return 1
 
-            # --- Desativação do Redial 2.0 ---
-            if body.startswith("DEACTIVATE"):
-                redial_lists[sender] = []
-                KSR.sl.send_reply(200, "Deactivated")
-                return 1
-                
-            KSR.sl.send_reply(400, "Unknown Command")
-            return 1
-
-        #  --- INVITE ---
+        # --- INVITE ---
         if KSR.is_method("INVITE"):
             target = KSR.pv.get("$tu")
             watchlist = redial_lists.get(sender, [])
@@ -168,12 +169,28 @@ class kamailio:
                 KSR.sl.send_reply(404, "Not Found")
             return 1
 
-        # 4. IN-DIALOG (ACK, BYE, ETC)
-        if KSR.rr.loose_route():
+        if KSR.is_method("ACK"):
+            KSR.info("ACK R-URI: " + KSR.pv.get("$ru") + "\n")
+            KSR.rr.loose_route()  # In case there are Record-Route headers
+            KSR.registrar.lookup("location")
             KSR.tm.t_relay()
-        return 1
+            return 1
 
-    # --- Reencaminhamento em redial ---
+        if KSR.is_method("BYE"):
+            KSR.info("BYE R-URI: " + KSR.pv.get("$ru") + "\n")
+            KSR.rr.loose_route()    # In case there are Record-Route headers
+            KSR.registrar.lookup("location")
+            KSR.tm.t_relay()
+            return 1
+
+        if KSR.is_method("CANCEL"):
+            KSR.info("CANCEL R-URI: " + KSR.pv.get("$ru") + "\n")
+            KSR.rr.loose_route()    # In case there are Record-Route headers
+            KSR.registrar.lookup("location")
+            KSR.tm.t_relay()
+            return 1
+
+    # --- Reencaminhamento do redial ---
     def failure_REDIAL(self, msg):
         status = int(KSR.pv.get("$rs") or 0)
         # 0=Local Timeout/Err, 408=Timeout, 480=Unavailable, 486=Busy

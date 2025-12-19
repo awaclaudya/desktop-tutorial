@@ -8,6 +8,8 @@ services:
           - sipnet.kamailio  # DNS name and a server for both:
           - acme.operador    #  sipnet.a, and 
           - sipnet.b    #  sipnet.b
+          - acme.pt
+          - sipnet.m
     environment:
       - SIP_DOMAIN=sipnet.kamailio
       - WITH_DB=no
@@ -50,6 +52,23 @@ services:
       - twinkle-bob:/root/.twinkle
     restart: unless-stopped
 
+  terminal_max:
+    image: twinkle:igrs_01
+    container_name: twinkle_max
+    networks:
+      - sipnet
+    hostname: sipnet.max
+    environment:
+      - DISPLAY=host.docker.internal:0
+    entrypoint: ["sh", "/root/start.sh"]
+    volumes:
+      - ./scripts/Max.cfg:/tmp/twinkle/Max.cfg:ro
+      - ./scripts/twinkle_max.sys:/tmp/twinkle/twinkle.sys:ro
+      - ./scripts_aux/.asoundrc:/root/.asoundrc:ro
+      - ./scripts_aux/start.sh:/root/start.sh:ro
+      - twinkle-max:/root/.twinkle
+    restart: unless-stopped
+
 networks:
   sipnet:
     driver: bridge
@@ -57,3 +76,4 @@ networks:
 volumes:
   twinkle-alice:
   twinkle-bob:
+  twinkle-max:
